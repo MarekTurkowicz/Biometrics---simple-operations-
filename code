@@ -1,0 +1,508 @@
+import tkinter as tk
+from tkinter import filedialog, simpledialog
+from PIL import Image, ImageTk
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import convolve2d, medfilt
+from scipy.ndimage import uniform_filter, generic_filter
+from rembg import remove
+import io
+import onnxruntime as ort
+
+class ImageEditor:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Edycja obrazu - Histogramy, LUT i edycja pikseli")
+        self.zoom_level = 1.0
+
+        # Załaduj obraz
+        self.image_path = filedialog.askopenfilename(
+            title="Wybierz obraz",
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.tiff")])
+
+        if not self.image_path:
+            print("Nie wybrano obrazu!")
+            self.root.destroy()
+            return
+
+        # Otwórz obraz
+        self.original_image = Image.open(self.image_path).convert("RGB")
+        self.image_copy = self.original_image.copy()
+        self.photo = ImageTk.PhotoImage(self.image_copy)
+
+        # Utwórz płótno do wyświetlania obrazu
+        self.canvas = tk.Canvas(root, width=self.image_copy.width, height=self.image_copy.height)
+        self.canvas.grid(row=0, column=0, padx=10, pady=10)
+        self.canvas_image = self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
+
+        # Dodaj obsługę kliknięcia myszy i zoom
+        self.canvas.bind("<Button-1>", self.start_select)
+        self.canvas.bind("<ButtonRelease-1>", self.end_select)
+        self.canvas.bind("<MouseWheel>", self.zoom)
+
+
+        # Ramka kontrolna
+        self.control_frame = tk.Frame(root)
+        self.control_frame.grid(row=1, column=0, pady=7)
+
+        # Pola do edycji RGB
+        self.r_value = tk.StringVar()
+        self.g_value = tk.StringVar()
+        self.b_value = tk.StringVar()
+        tk.Label(self.control_frame, text="R:").grid(row=0, column=0, padx=2)
+        tk.Entry(self.control_frame, textvariable=self.r_value, width=3).grid(row=0, column=1, padx=5)
+        tk.Label(self.control_frame, text="G:").grid(row=0, column=2, padx=2)
+        tk.Entry(self.control_frame, textvariable=self.g_value, width=3).grid(row=0, column=3, padx=5)
+        tk.Label(self.control_frame, text="B:").grid(row=0, column=4, padx=2)
+        tk.Entry(self.control_frame, textvariable=self.b_value, width=3).grid(row=0, column=5, padx=5)
+
+        # Przyciski
+        tk.Button(self.control_frame, text="Zmień piksel", command=self.modify_pixel).grid(row=0, column=6, padx=5)
+        tk.Button(self.control_frame, text="Resetuj obraz", command=self.reset_image).grid(row=0, column=7, padx=5)
+        tk.Button(self.control_frame, text="Pokaż histogram", command=self.show_histogram).grid(row=1, column=0, padx=5)
+        tk.Button(self.control_frame, text="Rozjaśnij", command=self.brighten_image).grid(row=1, column=1, padx=5)
+        tk.Button(self.control_frame, text="Przyciemnij", command=self.darken_image).grid(row=1, column=2, padx=5)
+        tk.Button(self.control_frame, text="Rozciągnij histogram", command=self.stretch_histogram).grid(row=1, column=3, padx=5)
+        tk.Button(self.control_frame, text="Wyrównaj histogram", command=self.equalize_histogram).grid(row=1, column=4, padx=5)
+
+        tk.Button(self.control_frame, text="Dolnoprzepustowy", command=lambda: self.choose_filter("Dolnoprzepustowy")).grid(row=2, column=0, padx=5)
+        tk.Button(self.control_frame, text="Prewitt", command=lambda: self.choose_filter("Prewitt")).grid(row=2,column=1,padx=5)
+        tk.Button(self.control_frame, text="Sobel", command=lambda: self.choose_filter("Sobel")).grid(row=2, column=2,padx=5)
+        tk.Button(self.control_frame, text="Laplace", command=lambda: self.choose_filter("Laplace")).grid(row=2, column=3, padx=5)
+        tk.Button(self.control_frame, text="Detekcja narożników", command=lambda: self.choose_filter("Detekcja narożników")).grid(row=2, column=4, padx=5)
+        tk.Button(self.control_frame, text="Własna maska 3x3", command=self.custom_filter).grid(row=3, column=0, padx=5)
+        tk.Button(self.control_frame, text="Medianowy 5x5", command=lambda: self.apply_median_filter(size=5)).grid(row=3, column=1, padx=5)
+
+
+        tk.Button(self.control_frame, text="Binaryzacja manualna", command=self.manual_thresholding).grid(row=4, column=0, padx=5)
+        tk.Button(self.control_frame, text="Binaryzacja Otsu", command=self.otsu_thresholding).grid(row=4, column=1, padx=5)
+        tk.Button(self.control_frame, text="Binaryzacja Niblacka", command=self.niblack_thresholding).grid(row=4, column=2, padx=5)
+        tk.Button(self.control_frame, text="Segmentacja RemBG", command=self.segment_with_rembg).grid(row=4, column=3, padx=5)
+
+        tk.Button(self.control_frame, text="Dolnoprzepustowy",
+                  command=lambda: self.choose_filter2("Dolnoprzepustowy")).grid(row=5, column=0, padx=5)
+        tk.Button(self.control_frame, text="Prewitt", command=lambda: self.choose_filter2("Prewitt")).grid(row=2,
+                                                                                                          column=1,
+                                                                                                          padx=5)
+        tk.Button(self.control_frame, text="Sobel", command=lambda: self.choose_filter2("Sobel")).grid(row=5, column=2,
+                                                                                                      padx=5)
+        tk.Button(self.control_frame, text="Laplace", command=lambda: self.choose_filter2("Laplace")).grid(row=5,                                                                                                          column=3,
+                                                                                                          padx=5)
+        tk.Button(self.control_frame, text="Detekcja narożników", command=lambda: self.choose_filter2("Detekcja narożników")).grid(row=5, column=4, padx=5)
+        tk.Button(self.control_frame, text="Własna maska 3x3", command=self.custom_filter).grid(row=5, column=0, padx=5)
+
+        # Zmienna do zaznaczenia prostokąta
+        self.selected_x = None
+        self.selected_y = None
+        self.rect = None
+
+    def start_select(self, event):
+        self.start_x, self.start_y = event.x, event.y
+        if self.rect:
+            self.canvas.delete(self.rect)
+        self.rect = self.canvas.create_rectangle(self.start_x, self.start_y, self.start_x, self.start_y, outline="red")
+
+    def end_select(self, event):
+        self.selected_x, self.end_x = sorted([self.start_x, event.x])
+        self.selected_y, self.end_y = sorted([self.start_y, event.y])
+        self.canvas.coords(self.rect, self.selected_x, self.selected_y, self.end_x, self.end_y)
+
+    def modify_pixel(self):
+        if self.selected_x is not None and self.selected_y is not None:
+            try:
+                new_r, new_g, new_b = int(self.r_value.get()), int(self.g_value.get()), int(self.b_value.get())
+                if all(0 <= v <= 255 for v in [new_r, new_g, new_b]):
+                    for x in range(self.selected_x, self.end_x):
+                        for y in range(self.selected_y, self.end_y):
+                            if x < self.image_copy.width and y < self.image_copy.height:
+                                self.image_copy.putpixel((x, y), (new_r, new_g, new_b))
+                    self.update_displayed_image()
+                else:
+                    print("Wartości muszą być w zakresie 0-255.")
+            except ValueError:
+                print("Podaj poprawne liczby dla R, G, B.")
+        else:
+            print("Nie wybrano żadnego piksela do modyfikacji!")
+
+    def show_histogram(self):
+        image_array = np.array(self.image_copy)
+        r, g, b = image_array[:, :, 0], image_array[:, :, 1], image_array[:, :, 2]
+
+        plt.figure(figsize=(12, 6))
+        plt.subplot(2, 2, 1)
+        plt.hist(r.ravel(), bins=256, color='red', alpha=0.5)
+        plt.title("Histogram - Kanał R")
+
+        plt.subplot(2, 2, 2)
+        plt.hist(g.ravel(), bins=256, color='green', alpha=0.5)
+        plt.title("Histogram - Kanał G")
+
+        plt.subplot(2, 2, 3)
+        plt.hist(b.ravel(), bins=256, color='blue', alpha=0.5)
+        plt.title("Histogram - Kanał B")
+
+        avg = (r + g + b) / 3
+        plt.subplot(2, 2, 4)
+        plt.hist(avg.ravel(), bins=256, color='gray', alpha=0.5)
+        plt.title("Histogram - Średnia (R+G+B)/3")
+        plt.tight_layout()
+        plt.show()
+
+    def brighten_image(self):
+        image_array = np.array(self.image_copy, dtype=np.float32) / 255.0
+        brightened = np.clip((image_array ** 0.5) * 255, 0, 255).astype(np.uint8)
+        self.update_image_from_array(brightened)
+
+    def darken_image(self):
+        image_array = np.array(self.image_copy, dtype=np.float32) / 255.0
+        darkened = np.clip(np.log1p(image_array) * 255, 0, 255).astype(np.uint8)
+        self.update_image_from_array(darkened)
+
+    def stretch_histogram(self):
+        image_array = np.array(self.image_copy, dtype=np.float32)  # Konwersja do float32 dla dokładności
+
+        stretched = np.zeros_like(image_array, dtype=np.uint8)
+
+        for i in range(3):  # Kanały: R (0), G (1), B (2)
+            channel = image_array[:, :, i]  # Pobierz kanał
+            k_min = channel.min()
+            k_max = channel.max()
+
+            if k_max > k_min:
+                stretched[:, :, i] = ((channel - k_min) / (k_max - k_min) * 255).clip(0, 255).astype(np.uint8)
+            else:
+                stretched[:, :, i] = channel.astype(np.uint8)  # Pozostaw kanał bez zmian
+
+        self.update_image_from_array(stretched)
+
+    def equalize_histogram(self):
+        # Konwersja obrazu do numpy array
+        image_array = np.array(self.image_copy, dtype=np.uint8)
+        height, width, _ = image_array.shape  # Rozmiary obrazu
+
+        # Tworzenie pustego obrazu na wynik
+        equalized = np.zeros_like(image_array, dtype=np.uint8)
+
+        for i in range(3):  # Kanały: R (0), G (1), B (2)
+            channel = image_array[:, :, i]  # Pobierz kanał
+
+            # Krok 1: Obliczenie histogramu i CDF
+            histogram, _ = np.histogram(channel, bins=256, range=(0, 256))
+            cdf = histogram.cumsum()  # Dystrybuanta
+            cdf_normalized = cdf / cdf[-1]  # Normalizacja do zakresu [0, 1]
+
+            # Krok 2: Obliczenie LUT
+            S0 = cdf_normalized[cdf > 0][0]  # Pierwsza niezerowa wartość CDF
+            LUT = ((cdf_normalized - S0) / (1 - S0) * 255).clip(0, 255).astype(np.uint8)
+
+            # Krok 3: Mapowanie pikseli za pomocą LUT
+            equalized[:, :, i] = LUT[channel]
+
+        # Aktualizacja obrazu
+        self.update_image_from_array(equalized)
+
+    def update_displayed_image(self):
+        self.photo = ImageTk.PhotoImage(self.image_copy)
+        self.canvas.itemconfig(self.canvas_image, image=self.photo)
+
+    def zoom(self, event):
+        """Zoom na całym obrazie lub na zaznaczonym obszarze."""
+        scale_factor = 1.1 if event.delta > 0 else 0.9
+
+        if self.selected_x is not None and self.selected_y is not None:
+            # Zoom na zaznaczonym fragmencie
+            fragment = self.image_copy.crop((self.selected_x, self.selected_y, self.end_x, self.end_y))
+
+            # Obliczanie nowego rozmiaru fragmentu
+            new_width = int(fragment.width * scale_factor)
+            new_height = int(fragment.height * scale_factor)
+            resized_fragment = fragment.resize((new_width, new_height), Image.BICUBIC)
+
+            # Tworzenie nowego obrazu z powiększonym fragmentem
+            new_image = self.image_copy.copy()
+            new_image.paste(resized_fragment, (self.selected_x, self.selected_y))
+            self.image_copy = new_image
+
+            # Aktualizacja wyświetlanego obrazu
+            self.update_displayed_image()
+        else:
+            # Zoom na całym obrazie
+            self.zoom_level *= scale_factor
+
+            # Ograniczenie poziomu zoomu
+            self.zoom_level = max(0.1, min(self.zoom_level, 5.0))
+
+            # Obliczanie nowego rozmiaru obrazu
+            new_width = int(self.image_copy.width * self.zoom_level)
+            new_height = int(self.image_copy.height * self.zoom_level)
+            resized_image = self.image_copy.resize((new_width, new_height), Image.BICUBIC)
+
+            # Aktualizacja obrazu na płótnie
+            self.photo = ImageTk.PhotoImage(resized_image)
+            self.canvas.config(width=new_width, height=new_height)
+            self.canvas.itemconfig(self.canvas_image, image=self.photo)
+
+
+    def reset_image(self):
+        self.image_copy = self.original_image.copy()
+        self.update_image_from_array(np.array(self.image_copy))
+
+    def update_image_from_array(self, image_array):
+        self.image_copy = Image.fromarray(image_array)
+        self.update_displayed_image()
+
+    def apply_convolution(self, mask):
+        """Realizuje splot obrazu z podaną maską"""
+        image_array = np.array(self.image_copy)
+        convolved_image = np.zeros_like(image_array)
+
+        # Aplikuj konwolucję na każdym kanale RGB
+        for i in range(3):
+            convolved_image[:, :, i] = convolve2d(image_array[:, :, i],mask,mode="same",boundary="symm")
+
+        convolved_image = np.clip(convolved_image, 0, 255).astype(np.uint8)
+        self.update_image_from_array(convolved_image)
+
+    def apply_convolution2(self, mask):
+        """Realizuje splot obrazu z podaną maską ręcznie"""
+        # Konwersja obrazu na tablicę numpy
+        image_array = np.array(self.image_copy)
+        mask_height, mask_width = mask.shape
+        img_height, img_width, channels = image_array.shape
+
+        # Przygotowanie pustej tablicy na wynik
+        convolved_image = np.zeros_like(image_array, dtype=np.float32)
+
+        # Obliczenie marginesu maski (rozmiaru krawędzi)
+        pad_h = mask_height // 2
+        pad_w = mask_width // 2
+
+        # Dodanie paddingu do obrazu (obszar poza krawędzią traktowany jako 0)
+        padded_image = np.pad(image_array,
+                              ((pad_h, pad_h), (pad_w, pad_w), (0, 0)),
+                              mode='constant')
+
+        # Iteracja po każdym kanale
+        for c in range(channels):
+            # Iteracja po pikselach w oryginalnym obrazie
+            for y in range(img_height):
+                for x in range(img_width):
+                    # Wycinamy sąsiedztwo o rozmiarze maski
+                    region = padded_image[y:y + mask_height, x:x + mask_width, c]
+                    # Obliczamy splot dla tego piksela
+                    convolved_image[y, x, c] = np.sum(region * mask)
+
+        # Przycinanie wartości do zakresu [0, 255] i konwersja na typ uint8
+        convolved_image = np.clip(convolved_image, 0, 255).astype(np.uint8)
+
+        # Aktualizacja obrazu po operacji konwolucji
+        self.update_image_from_array(convolved_image)
+
+    def choose_filter(self, filter_name):
+        """Wybiera maskę filtru na podstawie nazwy i wykonuje splot"""
+        filters = {
+            "Dolnoprzepustowy": np.array([
+                [1 / 9, 1 / 9, 1 / 9],
+                [1 / 9, 1 / 9, 1 / 9],
+                [1 / 9, 1 / 9, 1 / 9]
+            ]),
+            "Prewitt": np.array([
+                [-1, 0, 1],
+                [-1, 0, 1],
+                [-1, 0, 1]
+            ]),
+            "Sobel": np.array([
+                [-1, 0, 1],
+                [-2, 0, 2],
+                [-1, 0, 1]
+            ]),
+            "Laplace": np.array([
+                [0, -1, 0],
+                [-1, 4, -1],
+                [0, -1, 0]
+            ]),
+            "Detekcja narożników": np.array([
+                [1, 1, 1],
+                [1, -2, -1],
+                [1, -1, -1]
+            ])
+        }
+
+        if filter_name not in filters:
+            print("Nieznany filtr!")
+            return
+
+        mask = filters[filter_name]
+        self.apply_convolution(mask)
+
+    def choose_filter2(self, filter_name):
+        """Wybiera maskę filtru na podstawie nazwy i wykonuje splot"""
+        filters = {
+            "Dolnoprzepustowy": np.array([
+                [1 / 9, 1 / 9, 1 / 9],
+                [1 / 9, 1 / 9, 1 / 9],
+                [1 / 9, 1 / 9, 1 / 9]
+            ]),
+            "Prewitt": np.array([
+                [-1, 0, 1],
+                [-1, 0, 1],
+                [-1, 0, 1]
+            ]),
+            "Sobel": np.array([
+                [-1, 0, 1],
+                [-2, 0, 2],
+                [-1, 0, 1]
+            ]),
+            "Laplace": np.array([
+                [0, -1, 0],
+                [-1, 4, -1],
+                [0, -1, 0]
+            ]),
+            "Detekcja narożników": np.array([
+                [1, 1, 1],
+                [1, -2, -1],
+                [1, -1, -1]
+            ])
+        }
+
+        if filter_name not in filters:
+            print("Nieznany filtr!")
+            return
+
+        mask = filters[filter_name]
+        self.apply_convolution2(mask)
+
+    def custom_filter(self):
+        """Użytkownik wprowadza maskę 3x3"""
+        mask = []
+        for i in range(3):
+            row = simpledialog.askstring("Wprowadź wiersz maski",f"Wprowadź 3 wartości (oddzielone spacjami) dla wiersza {i + 1}:")
+            mask.append([float(x) for x in row.split()])
+
+        mask = np.array(mask)
+        self.apply_convolution(mask)
+
+    def apply_median_filter(self, size=5):
+        """Realizuje medianowy filtr o zadanym rozmiarze"""
+        image_array = np.array(self.image_copy)
+
+        # Medianowy filtr na każdym kanale RGB
+        median_filtered = np.zeros_like(image_array)
+        for i in range(3):
+            median_filtered[:, :, i] = medfilt(image_array[:, :, i], kernel_size=size)
+
+        self.update_image_from_array(median_filtered)
+
+    def to_grayscale(self, mode="average"):
+        """Konwertuje obraz do skali szarości w wybranym trybie."""
+        image_array = np.array(self.image_copy, dtype=np.float32)
+
+        if mode == "red":
+            grayscale = image_array[:, :, 0]  # Kanał czerwony
+        elif mode == "green":
+            grayscale = image_array[:, :, 1]  # Kanał zielony
+        elif mode == "blue":
+            grayscale = image_array[:, :, 2]  # Kanał niebieski
+        elif mode == "average":
+            grayscale = image_array.mean(axis=2)  # Średnia z RGB
+        else:
+            print("Nieznany tryb konwersji do skali szarości!")
+            return None
+
+        return np.clip(grayscale, 0, 255).astype(np.uint8)
+
+    def manual_thresholding(self):
+        """Binaryzacja manualna - użytkownik wybiera próg."""
+        # Zapytaj użytkownika o próg
+        threshold = simpledialog.askinteger("Binaryzacja manualna","Wprowadź wartość progu (0-255):",minvalue=0,maxvalue=255)
+
+        if threshold is None: return
+        grayscale = self.to_grayscale(mode="average")
+
+        # Binaryzacja
+        binary_image = np.where(grayscale > threshold, 255, 0).astype(np.uint8)
+
+        # Aktualizacja obrazu (konwersja do RGB dla wyświetlania)
+        binary_rgb = np.stack([binary_image] * 3, axis=-1)
+        self.update_image_from_array(binary_rgb)
+
+    def otsu_thresholding(self):
+        """Binaryzacja metodą Otsu."""
+        grayscale = self.to_grayscale(mode="average")
+        histogram, _ = np.histogram(grayscale, bins=256, range=(0, 256))
+
+        total_pixels = grayscale.size
+        histogram_normalized = histogram / total_pixels
+
+        # Obliczenie sumy wagowej
+        cumsum = np.cumsum(histogram_normalized)
+        cumulative_mean = np.cumsum(histogram_normalized * np.arange(256))
+
+        # Globalna średnia
+        global_mean = cumulative_mean[-1]
+
+        max_between_class_variance = 0
+        best_threshold = 0
+
+        # Przeglądanie wszystkich możliwych progów
+        for t in range(256):
+            weight_background = cumsum[t]  # Waga klasy tła
+            weight_foreground = 1 - weight_background  # Waga klasy obiektu
+
+            if weight_background == 0 or weight_foreground == 0: continue
+
+            mean_background = cumulative_mean[t] / weight_background
+            mean_foreground = (global_mean - cumulative_mean[t]) / weight_foreground
+
+            # Wariancja między klasami
+            between_class_variance = (weight_background * weight_foreground * (mean_background - mean_foreground) ** 2)
+
+            if between_class_variance > max_between_class_variance:
+                max_between_class_variance = between_class_variance
+                best_threshold = t
+
+        # Binaryzacja z wyznaczonym progiem
+        binary_image = np.where(grayscale > best_threshold, 255, 0).astype(np.uint8)
+
+        # Aktualizacja obrazu (konwersja do RGB dla wyświetlania)
+        binary_rgb = np.stack([binary_image] * 3, axis=-1)
+        self.update_image_from_array(binary_rgb)
+
+    def niblack_thresholding(self):
+        """Binaryzacja lokalna metodą Niblacka."""
+        grayscale = self.to_grayscale(mode="average")
+
+        window_size = simpledialog.askinteger(
+            "Metoda Niblacka","Wprowadź rozmiar okna (nieparzysta liczba, np. 3, 5, 7):", minvalue=3
+        )
+        k = simpledialog.askfloat("Metoda Niblacka","Wprowadź wartość parametru k (np. -0.2, 0, 0.5):", minvalue=-1.0, maxvalue=1.0)
+
+        if window_size is None or k is None:
+            return
+        if window_size % 2 == 0:
+            print("Rozmiar okna musi być nieparzysty!")
+            return
+
+        #średnia i odchylenia standardowego w sąsiedztwie
+        mean = uniform_filter(grayscale, size=window_size)
+        squared_mean = uniform_filter(grayscale ** 2, size=window_size)
+        std_dev = np.sqrt(squared_mean - mean ** 2)
+
+        threshold = mean + k * std_dev
+        binary_image = np.where(grayscale > threshold, 255, 0).astype(np.uint8)
+
+        #konwersja do RGB)
+        binary_rgb = np.stack([binary_image] * 3, axis=-1)
+        self.update_image_from_array(binary_rgb)
+
+    def segment_with_rembg(self):
+        """Segmentacja obrazu za pomocą modelu RemBG dla wczytanego obrazu."""
+        output_image = remove(self.image_copy)
+        self.image_copy = output_image
+        self.update_displayed_image()
+
+
+# Uruchom aplikację
+root = tk.Tk()
+app = ImageEditor(root)
+root.mainloop()
